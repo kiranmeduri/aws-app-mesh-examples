@@ -1,0 +1,492 @@
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name to link stacks
+
+  AppMeshXdsEndpoint:
+    Type: String
+    Description: App Mesh XDS Endpoint Override
+    Default: ""
+
+  EnvoyImage:
+    Type: String
+    Description: Envoy container image
+    Default: "111345817488.dkr.ecr.us-west-2.amazonaws.com/aws-appmesh-envoy:v1.11.1.0-prod"
+
+  FrontAppImage:
+    Type: String
+    Description: Front app container image
+
+  ColorAppImage:
+    Type: String
+    Description: Color app container image
+
+  FrontEnvoyStaticConfigImage:
+    Type: String
+    Description: Image to provide Envoy static configs for front app
+
+  LocalEnvoyStaticConfigImage:
+    Type: String
+    Description: Image to provide Envoy static configs for local service app (e.g. color)
+
+  FrontAppPort:
+    Type: Number
+    Description: Port number to use for front app
+    Default: 8080
+
+  ColorAppPort:
+    Type: Number
+    Description: Port number to use for color app
+    Default: 8080
+
+Resources:
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for the tasks"
+      VpcId:
+        Fn::ImportValue: !Sub '${ProjectName}:VPC'
+      SecurityGroupIngress:
+        - CidrIp:
+            Fn::ImportValue: !Sub '${ProjectName}:VpcCIDR'
+          IpProtocol: -1
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ProjectName}-log-group'
+      RetentionInDays: 30
+
+  TaskIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/AWSAppMeshEnvoyAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerServiceFullAccess
+
+  TaskExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  ColorServiceRegistry:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'colorapp'
+      DnsConfig:
+        NamespaceId:
+          Fn::ImportValue:
+            !Sub '${ProjectName}:DnsNamespaceId'
+        DnsRecords:
+          - Type: SRV
+            TTL: 300
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  ColorTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - 'EC2'
+      Family: 'green'
+      NetworkMode: 'host'
+      Cpu: 256
+      Memory: 512
+      TaskRoleArn: !Ref TaskIamRole
+      ExecutionRoleArn: !Ref TaskExecutionIamRole
+      ContainerDefinitions:
+        - Name: 'app'
+          Image: !Ref ColorAppImage
+          Essential: true
+          DependsOn:
+            - ContainerName: 'envoy'
+              Condition: 'START'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub ${ProjectName}-log-group
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          PortMappings:
+            - ContainerPort: !Ref ColorAppPort
+              HostPort: !Ref ColorAppPort
+              Protocol: 'tcp'
+          Environment:
+            - Name: COLOR
+              Value: 'green'
+            - Name: PORT
+              Value: !Sub '${ColorAppPort}'
+            - Name: USE_IPV6 #TODO: remove this
+              Value: 'False'
+        - Name: envoy
+          Image: !Ref EnvoyImage
+          Essential: true
+          User: '1337'
+          VolumesFrom:
+            - SourceContainer: envoy-conf
+              ReadOnly: true
+          Ulimits:
+            - Name: "nofile"
+              HardLimit: 15000
+              SoftLimit: 15000
+          PortMappings:
+            - ContainerPort: 9901
+              Protocol: 'tcp'
+            - ContainerPort: 15000
+              Protocol: 'tcp'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub '${ProjectName}-log-group'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          Environment:
+            - Name: 'ENVOY_CONFIG_FILE'
+              Value: '/etc/envoy/envoy-config.json'
+            - Name: 'ENVOY_LOG_LEVEL'
+              Value: 'debug'
+            - Name: 'APPMESH_VIRTUAL_NODE_NAME'
+              Value: !Sub 'mesh/staticMesh/virtualNode/static-color-node'
+        - Name: envoy-conf
+          Image: !Ref LocalEnvoyStaticConfigImage
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub '${ProjectName}-log-group'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          Environment:
+            - Name: 'APP_PORT'
+              Value: !Sub '${ColorAppPort}'
+
+  ColorService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ColorServiceRegistry
+    Properties:
+      Cluster:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:ECSCluster"
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      LaunchType: 'EC2'
+      ServiceRegistries:
+        - RegistryArn: !GetAtt 'ColorServiceRegistry.Arn'
+          ContainerName: app
+          ContainerPort: !Ref ColorAppPort
+      TaskDefinition: !Ref ColorTaskDef
+
+  ColorVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualNodeName: !Sub '${ProjectName}-color-node'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Ref ColorAppPort
+              Protocol: http
+        ServiceDiscovery:
+          AWSCloudMap:
+            NamespaceName:
+              Fn::ImportValue:
+                !Sub '${ProjectName}:DnsNamespaceName'
+            ServiceName: !GetAtt ColorServiceRegistry.Name
+            Attributes:
+              - Key: 'ECS_TASK_DEFINITION_FAMILY'
+                Value: 'green'
+
+  ColorVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    DependsOn:
+      - ColorVirtualRouter
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualServiceName:
+        Fn::Join:
+          - ''
+          -
+            - !GetAtt ColorServiceRegistry.Name
+            - '.'
+            - Fn::ImportValue:
+                !Sub '${ProjectName}:DnsNamespaceName'
+      Spec:
+        Provider:
+          VirtualRouter:
+            VirtualRouterName: !GetAtt ColorVirtualRouter.VirtualRouterName
+
+  ColorVirtualRouter:
+    Type: AWS::AppMesh::VirtualRouter
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualRouterName: !Sub '${ProjectName}-color-router'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Ref ColorAppPort
+              Protocol: http
+
+  ColorRoute:
+    Type: AWS::AppMesh::Route
+    DependsOn:
+      - ColorVirtualRouter
+      - ColorVirtualNode
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualRouterName: !GetAtt ColorVirtualRouter.VirtualRouterName
+      RouteName: !Sub '${ProjectName}-color-route'
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: '/'
+          Action:
+            WeightedTargets:
+              - VirtualNode: !GetAtt ColorVirtualNode.VirtualNodeName
+                Weight: 100
+
+  # Frontend
+  SecurityGroupIngressFromPublicALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Access to the public facing load balancer'
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:VPC"
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets:
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:PublicSubnet1'
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:PublicSubnet2'
+      SecurityGroups:
+        - !Ref PublicLoadBalancerSecurityGroup
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: '/ping'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 120
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:VPC"
+
+  PublicLoadBalancerListener:
+    DependsOn:
+      - PublicLoadBalancer
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref WebTargetGroup
+          Type: 'forward'
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  WebLoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref WebTargetGroup
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '*'
+      ListenerArn: !Ref PublicLoadBalancerListener
+      Priority: 1
+
+  FrontVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    DependsOn:
+      - ColorVirtualService
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualNodeName: !Sub "${ProjectName}-front-node"
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Sub '${FrontAppPort}'
+              Protocol: http
+        ServiceDiscovery:
+          DNS:
+            Hostname: !GetAtt PublicLoadBalancer.DNSName
+        Backends:
+          - VirtualService:
+              VirtualServiceName: !GetAtt 'ColorVirtualService.VirtualServiceName'
+
+  FrontTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - ColorVirtualService
+      - FrontVirtualNode
+    Properties:
+      RequiresCompatibilities:
+        - 'EC2'
+      Family: 'front'
+      NetworkMode: 'host'
+      Cpu: 256
+      Memory: 512
+      TaskRoleArn: !Ref TaskIamRole
+      ExecutionRoleArn: !Ref TaskExecutionIamRole
+      ContainerDefinitions:
+        - Name: 'app'
+          Image: !Ref FrontAppImage
+          Essential: true
+          DependsOn:
+            - ContainerName: 'envoy'
+              Condition: 'START'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub '${ProjectName}-log-group'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'front'
+          PortMappings:
+            - ContainerPort: !Ref FrontAppPort
+              HostPort: !Ref FrontAppPort
+              Protocol: 'tcp'
+          Environment:
+            - Name: 'PROXY_EGRESS_PORT'
+              Value: '15001'
+            - Name: 'COLOR_HOST'
+              Value: !Join ['', [!GetAtt 'ColorVirtualService.VirtualServiceName', ':', !Sub '${ColorAppPort}']]
+            - Name: 'PORT'
+              Value: !Sub '${FrontAppPort}'
+        - Name: envoy
+          Image: !Ref EnvoyImage
+          Essential: true
+          User: '1337'
+          VolumesFrom:
+            - SourceContainer: envoy-conf
+              ReadOnly: true
+          Ulimits:
+            - Name: "nofile"
+              HardLimit: 15000
+              SoftLimit: 15000
+          PortMappings:
+            - ContainerPort: 9901
+              Protocol: 'tcp'
+            - ContainerPort: 15001
+              Protocol: 'tcp'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub '${ProjectName}-log-group'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'front'
+          Environment:
+            - Name: 'ENVOY_CONFIG_FILE'
+              Value: '/etc/envoy/envoy-config.json'
+            - Name: 'ENVOY_LOG_LEVEL'
+              Value: 'debug'
+            - Name: 'APPMESH_VIRTUAL_NODE_NAME'
+              Value: !Sub 'mesh/staticMesh/virtualNode/static-front-node'
+        - Name: envoy-conf
+          Image: !Ref FrontEnvoyStaticConfigImage
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub '${ProjectName}-log-group'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'front'
+          Environment:
+            - Name: 'ECS_CLUSTER'
+              Value:
+                Fn::ImportValue:
+                  !Sub "${ProjectName}:ECSCluster"
+            - Name: 'COLOR_FQDN'
+              Value: !GetAtt 'ColorVirtualService.VirtualServiceName'
+            - Name: 'COLOR_PORT'
+              Value: !Sub '${ColorAppPort}'
+            - Name: 'COLOR_ECS_SERVICE'
+              Value: !Ref ColorService
+            - Name: 'AWS_DEFAULT_REGION'
+              Value: !Ref AWS::Region
+
+  FrontService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - WebLoadBalancerRule
+    Properties:
+      Cluster:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:ECSCluster"
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      LaunchType: 'EC2'
+      TaskDefinition: !Ref FrontTaskDef
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: !Ref FrontAppPort
+          TargetGroupArn: !Ref WebTargetGroup
+
+Outputs:
+  FrontEndpoint:
+    Description: 'Public endpoint for Front service'
+    Value: !Join ['', ['http://', !GetAtt 'PublicLoadBalancer.DNSName']]
+    Export:
+      Name: !Sub "${ProjectName}:FrontEndpoint"

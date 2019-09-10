@@ -1,0 +1,563 @@
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name to link stacks
+
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.0.0.0/19
+
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.0.32.0/19
+
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.0.64.0/19
+
+  PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.0.96.0/19
+
+  InstanceType:
+    Description: Which instance type should we use to build the ECS cluster?
+    Type: String
+    Default: c4.large
+
+  ClusterSize:
+    Description: How many ECS hosts do you want to initially deploy?
+    Type: Number
+    Default: 5
+
+  ECSAmi:
+    Description: ECS AMI ID
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: "/aws/service/ecs/optimized-ami/amazon-linux/recommended/image_id"
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref ProjectName
+
+  IPv6CidrBlock:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AmazonProvidedIpv6CidrBlock: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref ProjectName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  EgressOnlyInternetGateway:
+    Type: AWS::EC2::EgressOnlyInternetGateway
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - IPv6CidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: !Select [ 0, !Cidr [ !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks], 256, 64 ]]
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Public Subnet (AZ1)'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - IPv6CidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: !Select [ 1, !Cidr [ !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks], 256, 64 ]]
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Public Subnet (AZ2)'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - IPv6CidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: !Select [ 2, !Cidr [ !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks], 256, 64 ]]
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Private Subnet (AZ1)'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - IPv6CidrBlock
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AssignIpv6AddressOnCreation: true
+      Ipv6CidrBlock: !Select [ 3, !Cidr [ !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks], 256, 64 ]]
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Private Subnet (AZ2)'
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Public Routes'
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  DefaultPublicIpv6Route:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationIpv6CidrBlock: ::/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Private Routes (AZ1)'
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  DefaultPrivateIpv6Route1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationIpv6CidrBlock: ::/0
+      EgressOnlyInternetGatewayId: !Ref EgressOnlyInternetGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Private Routes (AZ2)'
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  DefaultPrivateIpv6Route2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationIpv6CidrBlock: ::/0
+      EgressOnlyInternetGatewayId: !Ref EgressOnlyInternetGateway
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  Mesh:
+    Type: AWS::AppMesh::Mesh
+    Properties:
+      MeshName: !Ref ProjectName
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ProjectName
+
+  DnsNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Sub '${ProjectName}.pvt.local'
+      Vpc: !Ref VPC
+
+  # Launch ECS instances to test IPV6 using networkmode=host
+  ECSInstancesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for the instances"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: !GetAtt VPC.CidrBlock
+          IpProtocol: -1
+        - CidrIpv6: !Select [ 0, !GetAtt VPC.Ipv6CidrBlocks]
+          IpProtocol: -1
+
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      LaunchConfigurationName: !Ref ECSLaunchConfiguration
+      MinSize: !Ref ClusterSize
+      MaxSize: !Ref ClusterSize
+      DesiredCapacity: !Ref ClusterSize
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName} ECS host
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        SuspendProcesses:
+          - HealthCheck
+          - ReplaceUnhealthy
+          - AZRebalance
+          - AlarmNotification
+          - ScheduledActions
+        WaitOnResourceSignals: true
+
+  ECSLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref ECSAmi
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref ECSInstancesSecurityGroup
+      IamInstanceProfile: !Ref ECSInstanceProfile
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash
+          yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+          yum install -y aws-cfn-bootstrap hibagent
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSLaunchConfiguration
+          /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSAutoScalingGroup
+          /usr/bin/enable-ec2-spot-hibernation
+
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              awslogs: []
+
+          commands:
+            01_add_instance_to_cluster:
+              command: !Sub echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              mode: 000400
+              owner: root
+              group: root
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.ECSLaunchConfiguration.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSLaunchConfiguration
+
+            "/etc/awslogs/awscli.conf":
+              content: !Sub |
+                [plugins]
+                cwlogs = cwlogs
+                [default]
+                region = ${AWS::Region}
+
+            "/etc/awslogs/awslogs.conf":
+              content: !Sub |
+                [general]
+                state_file = /var/lib/awslogs/agent-state
+
+                [/var/log/dmesg]
+                file = /var/log/dmesg
+                log_group_name = ${ECSCluster}-/var/log/dmesg
+                log_stream_name = ${ECSCluster}
+
+                [/var/log/messages]
+                file = /var/log/messages
+                log_group_name = ${ECSCluster}-/var/log/messages
+                log_stream_name = ${ECSCluster}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/docker]
+                file = /var/log/docker
+                log_group_name = ${ECSCluster}-/var/log/docker
+                log_stream_name = ${ECSCluster}
+                datetime_format = %Y-%m-%dT%H:%M:%S.%f
+
+                [/var/log/ecs/ecs-init.log]
+                file = /var/log/ecs/ecs-init.log.*
+                log_group_name = ${ECSCluster}-/var/log/ecs/ecs-init.log
+                log_stream_name = ${ECSCluster}
+                datetime_format = %Y-%m-%dT%H:%M:%SZ
+
+                [/var/log/ecs/ecs-agent.log]
+                file = /var/log/ecs/ecs-agent.log.*
+                log_group_name = ${ECSCluster}-/var/log/ecs/ecs-agent.log
+                log_stream_name = ${ECSCluster}
+                datetime_format = %Y-%m-%dT%H:%M:%SZ
+
+                [/var/log/ecs/audit.log]
+                file = /var/log/ecs/audit.log.*
+                log_group_name = ${ECSCluster}-/var/log/ecs/audit.log
+                log_stream_name = ${ECSCluster}
+                datetime_format = %Y-%m-%dT%H:%M:%SZ
+
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+              awslogs:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/awslogs/awslogs.conf
+                  - /etc/awslogs/awscli.conf
+
+  # This IAM Role is attached to all of the ECS hosts. It is based on the default role
+  # published here:
+  # http://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html
+  #
+  # You can add other IAM policy statements here to allow access from your ECS hosts
+  # to other AWS services. Please note that this role will be used by ALL containers
+  # running on the ECS host.
+
+  ECSInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Action": "sts:AssumeRole",
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ec2.amazonaws.com"
+            }
+          }]
+        }
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument: |
+            {
+              "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                  "ecs:CreateCluster",
+                  "ecs:DeregisterContainerInstance",
+                  "ecs:DiscoverPollEndpoint",
+                  "ecs:Poll",
+                  "ecs:RegisterContainerInstance",
+                  "ecs:StartTelemetrySession",
+                  "ecs:Submit*",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents",
+                  "ecr:BatchCheckLayerAvailability",
+                  "ecr:BatchGetImage",
+                  "ecr:GetDownloadUrlForLayer",
+                  "ecr:GetAuthorizationToken",
+                  "ssm:DescribeAssociation",
+                  "ssm:GetDeployablePatchSnapshotForInstance",
+                  "ssm:GetDocument",
+                  "ssm:GetManifest",
+                  "ssm:GetParameters",
+                  "ssm:ListAssociations",
+                  "ssm:ListInstanceAssociations",
+                  "ssm:PutInventory",
+                  "ssm:PutComplianceItems",
+                  "ssm:PutConfigurePackageResult",
+                  "ssm:UpdateAssociationStatus",
+                  "ssm:UpdateInstanceAssociationStatus",
+                  "ssm:UpdateInstanceInformation",
+                  "ec2messages:AcknowledgeMessage",
+                  "ec2messages:DeleteMessage",
+                  "ec2messages:FailMessage",
+                  "ec2messages:GetEndpoint",
+                  "ec2messages:GetMessages",
+                  "ec2messages:SendReply",
+                  "cloudwatch:PutMetricData",
+                  "ec2:DescribeInstanceStatus",
+                  "ds:CreateComputer",
+                  "ds:DescribeDirectories",
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:DescribeLogGroups",
+                  "logs:DescribeLogStreams",
+                  "logs:PutLogEvents",
+                  "s3:PutObject",
+                  "s3:GetObject",
+                  "s3:AbortMultipartUpload",
+                  "s3:ListMultipartUploadParts",
+                  "s3:ListBucket",
+                  "s3:ListBucketMultipartUploads"
+                ],
+                "Resource": "*"
+              }]
+            }
+
+  ECSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ECSInstanceRole
+
+Outputs:
+  VPC:
+    Description: A reference to the created VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${ProjectName}:VPC'
+
+  PublicSubnet1:
+    Description: A reference to the public subnet in the 1st Availability Zone
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub '${ProjectName}:PublicSubnet1'
+
+  PrivateSubnet1:
+    Description: A reference to the private subnet in the 1st Availability Zone
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub '${ProjectName}:PrivateSubnet1'
+
+  PublicSubnet2:
+    Description: A reference to the public subnet in the 2nd Availability Zone
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub '${ProjectName}:PublicSubnet2'
+
+  PrivateSubnet2:
+    Description: A reference to the private subnet in the 2nd Availability Zone
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub '${ProjectName}:PrivateSubnet2'
+
+  VpcCIDR:
+    Description: VPC CIDR
+    Value: !Ref VpcCIDR
+    Export:
+      Name: !Sub '${ProjectName}:VpcCIDR'
+
+  Mesh:
+    Description: A reference to the App Mesh mesh
+    Value: !GetAtt Mesh.MeshName
+    Export:
+      Name: !Sub "${ProjectName}:Mesh"
+
+  Cluster:
+    Description: A reference to the ECS cluster
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${ProjectName}:ECSCluster"
+
+  DnsNamespaceName:
+    Description: Dns Namespace
+    Value: !Sub '${ProjectName}.pvt.local'
+    Export:
+      Name: !Sub "${ProjectName}:DnsNamespaceName"
+
+  DnsNamespaceId:
+    Description: Dns Namespace
+    Value: !GetAtt DnsNamespace.Id
+    Export:
+      Name: !Sub "${ProjectName}:DnsNamespaceId"
