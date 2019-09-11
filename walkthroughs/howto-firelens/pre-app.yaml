@@ -1,0 +1,300 @@
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name to link stacks
+
+  ContainerPort:
+    Type: Number
+    Description: Port number to use for applications
+    Default: 8080
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ProjectName}-log-group'
+      RetentionInDays: 30
+
+  TaskIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/AWSAppMeshEnvoyAccess
+
+  TaskExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  ColorServiceRegistry:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'color'
+      DnsConfig:
+        NamespaceId:
+          Fn::ImportValue:
+            !Sub '${ProjectName}:DnsNamespaceId'
+        DnsRecords:
+          - Type: A
+            TTL: 300
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  ColorVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualNodeName: !Sub '${ProjectName}-color-node'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Ref ContainerPort
+              Protocol: http
+        ServiceDiscovery:
+          AWSCloudMap:
+            NamespaceName:
+              Fn::ImportValue:
+                !Sub '${ProjectName}:DnsNamespaceName'
+            ServiceName: !GetAtt ColorServiceRegistry.Name
+            Attributes:
+              - Key: 'ECS_TASK_DEFINITION_FAMILY'
+                Value: 'green'
+
+  ColorVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    DependsOn:
+      - ColorVirtualRouter
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualServiceName:
+        Fn::Join:
+          - '.'
+          - - !GetAtt 'ColorServiceRegistry.Name'
+            - !Sub '${ProjectName}.appmesh'
+      Spec:
+        Provider:
+          VirtualRouter:
+            VirtualRouterName: !GetAtt ColorVirtualRouter.VirtualRouterName
+
+  ColorVirtualRouter:
+    Type: AWS::AppMesh::VirtualRouter
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualRouterName: !Sub '${ProjectName}-color-router'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Ref ContainerPort
+              Protocol: http
+
+  ColorRoute:
+    Type: AWS::AppMesh::Route
+    DependsOn:
+      - ColorVirtualRouter
+      - ColorVirtualNode
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualRouterName: !GetAtt ColorVirtualRouter.VirtualRouterName
+      RouteName: !Sub '${ProjectName}-color-route'
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: '/'
+          Action:
+            WeightedTargets:
+              - VirtualNode: !GetAtt ColorVirtualNode.VirtualNodeName
+                Weight: 50
+
+  SecurityGroupIngressFromPublicALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Access to the public facing load balancer'
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:VPC"
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets:
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:PublicSubnet1'
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:PublicSubnet2'
+      SecurityGroups:
+        - !Ref PublicLoadBalancerSecurityGroup
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: '/ping'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Sub '${ProjectName}-webtarget'
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 120
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:VPC"
+
+  PublicLoadBalancerListener:
+    DependsOn:
+      - PublicLoadBalancer
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref WebTargetGroup
+          Type: 'forward'
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  WebLoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref WebTargetGroup
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '*'
+      ListenerArn: !Ref PublicLoadBalancerListener
+      Priority: 1
+
+  FrontVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    DependsOn:
+      - ColorVirtualService
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualNodeName: !Sub "${ProjectName}-front-node"
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Sub '${ContainerPort}'
+              Protocol: http
+        ServiceDiscovery:
+          DNS:
+            Hostname: !GetAtt PublicLoadBalancer.DNSName
+        Backends:
+          - VirtualService:
+              VirtualServiceName: !GetAtt 'ColorVirtualService.VirtualServiceName'
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for the tasks"
+      VpcId:
+        Fn::ImportValue: !Sub '${ProjectName}:VPC'
+      SecurityGroupIngress:
+        - CidrIp:
+            Fn::ImportValue: !Sub '${ProjectName}:VpcCIDR'
+          IpProtocol: -1
+
+Outputs:
+  LogGroup:
+    Value: !Ref LogGroup
+    Export:
+      Name: !Sub "${ProjectName}:LogGroup"
+
+  TaskIamRole:
+    Value: !Ref TaskIamRole
+    Export:
+      Name: !Sub "${ProjectName}:TaskIamRole"
+
+  TaskExecutionIamRole:
+    Value: !Ref TaskExecutionIamRole
+    Export:
+      Name: !Sub "${ProjectName}:TaskExecutionIamRole"
+
+  TaskSecurityGroup:
+    Value: !Ref TaskSecurityGroup
+    Export:
+      Name: !Sub "${ProjectName}:TaskSecurityGroup"
+
+  ColorVirtualNodeName:
+    Value: !GetAtt ColorVirtualNode.VirtualNodeName
+    Export:
+      Name: !Sub "${ProjectName}:ColorVirtualNodeName"
+
+  FrontVirtualNodeName:
+    Value: !GetAtt FrontVirtualNode.VirtualNodeName
+    Export:
+      Name: !Sub "${ProjectName}:FrontVirtualNodeName"
+
+  ColorServiceRegistryArn:
+    Value: !GetAtt ColorServiceRegistry.Arn
+    Export:
+      Name: !Sub "${ProjectName}:ColorServiceRegistryArn"
+
+  ColorServiceRegistryName:
+    Value: !GetAtt ColorServiceRegistry.Name
+    Export:
+      Name: !Sub "${ProjectName}:ColorServiceRegistryName"
+      
+  WebTargetGroup:
+    Value: !Ref WebTargetGroup
+    Export:
+      Name: !Sub "${ProjectName}:WebTargetGroup"
+
+  FrontEndpoint:
+    Description: 'Public endpoint for Front service'
+    Value: !Join ['', ['http://', !GetAtt 'PublicLoadBalancer.DNSName']]
+    Export:
+      Name: !Sub "${ProjectName}:FrontEndpoint"

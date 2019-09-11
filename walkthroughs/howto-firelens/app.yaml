@@ -1,0 +1,75 @@
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name to link stacks
+
+  ContainerPort:
+    Type: Number
+    Description: Port number to use for applications
+    Default: 8080
+
+  ColorTaskDef:
+    Type: String
+  
+  FrontTaskDef:
+    Type: String
+
+Resources:
+
+  ColorService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:ECSCluster"
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      LaunchType: 'FARGATE'
+      ServiceRegistries:
+        - RegistryArn: 
+            Fn::ImportValue:
+              !Sub "${ProjectName}:ColorServiceRegistryArn"
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue:
+                !Sub "${ProjectName}:TaskSecurityGroup"
+          Subnets:
+            - Fn::ImportValue:
+               !Sub '${ProjectName}:PrivateSubnet1'
+            - Fn::ImportValue:
+                !Sub '${ProjectName}:PrivateSubnet2'
+      TaskDefinition: !Ref ColorTaskDef
+  
+  FrontService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:ECSCluster"
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      LaunchType: 'FARGATE'
+      TaskDefinition: !Ref FrontTaskDef
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: 
+            Fn::ImportValue:
+              !Sub "${ProjectName}:WebTargetGroup"
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue:
+                !Sub "${ProjectName}:TaskSecurityGroup"
+          Subnets:
+            - Fn::ImportValue:
+                !Sub '${ProjectName}:PrivateSubnet1'
+            - Fn::ImportValue:
+                !Sub '${ProjectName}:PrivateSubnet2'

@@ -1,0 +1,227 @@
+{
+    "networkMode": "awsvpc",
+    "cpu": "256",
+    "memory": "512",
+    "executionRoleArn": "${TASK_EXECUTION_IAM_ROLE}",
+    "taskRoleArn": "${TASK_IAM_ROLE}",
+    "proxyConfiguration": {
+        "type": "APPMESH",
+        "containerName": "envoy",
+        "properties": [
+            {
+                "name": "IgnoredUID",
+                "value": "1337"
+            },
+            {
+                "name": "ProxyIngressPort",
+                "value": "15000"
+            },
+            {
+                "name": "ProxyEgressPort",
+                "value": "15001"
+            },
+            {
+                "name": "AppPorts",
+                "value": "9080"
+            },
+            {
+                "name": "EgressIgnoredIPs",
+                "value": "169.254.170.2,169.254.169.254"
+            }
+        ]
+    },
+    "containerDefinitions": [
+        {
+            "essential": true,
+            "image": "amazon/aws-xray-daemon",
+            "name": "xray",
+            "user": "1337",
+            "logConfiguration": {
+                "logDriver": "awsfirelens",
+                "options": {
+                    "Name": "cloudwatch",
+                    "region": "${AWS_DEFAULT_REGION}",
+                    "log_group_name": "${LOG_GROUP}",
+                    "auto_create_group": "true",
+                    "log_stream_prefix": "curler"
+                }
+            },
+            "portMappings": [
+                {
+                    "containerPort": 2000,
+                    "protocol": "udp"
+                }
+            ]
+        },
+        {
+            "name": "envoy",
+            "image": "${ENVOY_IMAGE}",
+            "essential": true,
+            "user": "1337",
+            "portMappings": [
+                {
+                    "containerPort": 9901,
+                    "protocol": "tcp"
+                },
+                {
+                    "containerPort": 15000,
+                    "protocol": "tcp"
+                },
+                {
+                    "containerPort": 15001,
+                    "protocol": "tcp"
+                }
+            ],
+            "healthCheck": {
+                "command": [
+                    "CMD-SHELL",
+                    "curl -s http://localhost:9901/server_info | grep state | grep -q LIVE"
+                ],
+                "startPeriod": 10,
+                "interval": 5,
+                "timeout": 2,
+                "retries": 3
+            },
+            "logConfiguration": {
+                "logDriver": "awsfirelens",
+                "options": {
+                    "Name": "cloudwatch",
+                    "region": "${AWS_DEFAULT_REGION}",
+                    "log_group_name": "${LOG_GROUP}",
+                    "auto_create_group": "true",
+                    "log_stream_prefix": "envoy"
+                }
+            },
+            "environment": [
+                {
+                    "name": "APPMESH_VIRTUAL_NODE_NAME",
+                    "value": "mesh/${MESH_NAME}/virtualNode/${COLOR_VIRTUAL_NODE_NAME}"
+                },
+                {
+                    "name": "ENVOY_LOG_LEVEL",
+                    "value": "debug"
+                },
+                {
+                    "name": "ENABLE_ENVOY_XRAY_TRACING",
+                    "value": "0"
+                },
+                {
+                    "name": "ENABLE_ENVOY_STATS_TAGS",
+                    "value": "1"
+                }
+            ],
+            "dependsOn": [
+                {
+                    "containerName": "xray",
+                    "condition": "START"
+                }
+            ]
+        },
+        {
+            "essential": true,
+            "image": "${CURLER_APP_IMAGE}",
+            "name": "curler",
+            "healthCheck": {
+                "command": [
+                    "CMD-SHELL",
+                    "curl -s https://logs.${AWS_DEFAULT_REGION}.amazonaws.com  | grep MissingAuthenticationTokenException"
+                ],
+                "startPeriod": 10,
+                "interval": 5,
+                "timeout": 2,
+                "retries": 3
+            },
+            "environment": [
+                {
+                    "name": "URL",
+                    "value": "http://localhost:9901/config_dump"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "${LOG_GROUP}",
+                    "awslogs-region": "${AWS_DEFAULT_REGION}",
+                    "awslogs-create-group": "true",
+                    "awslogs-stream-prefix": "curler"
+                }
+            },
+            "dependsOn": [
+                {
+                    "containerName": "envoy",
+                    "condition": "HEALTHY"
+                }
+            ]
+        },
+        {
+            "essential": true,
+            "image": "${AWS_FLUENT_BIT_IMAGE}",
+            "memory": 128,
+            "name": "log_router",
+            "firelensConfiguration": {
+                "type": "fluentbit"
+            },
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "${LOG_GROUP}",
+                    "awslogs-region": "${AWS_DEFAULT_REGION}",
+                    "awslogs-create-group": "true",
+                    "awslogs-stream-prefix": "firelens"
+                }
+            },
+            "dependsOn": [
+                {
+                    "containerName": "curler",
+                    "condition": "HEALTHY"
+                }
+            ]
+        },     
+        {
+            "essential": true,
+            "image": "${COLOR_APP_IMAGE}",
+            "name": "app",
+            "memory": 128,
+            "logConfiguration": {
+                "logDriver": "awsfirelens",
+                "options": {
+                    "Name": "cloudwatch",
+                    "region": "${AWS_DEFAULT_REGION}",
+                    "log_group_name": "${LOG_GROUP}",
+                    "auto_create_group": "true",
+                    "log_stream_prefix": "app"
+                }
+            },
+            "portMappings": [
+                {
+                    "containerPort": ${CONTAINER_PORT},
+                    "protocol": "tcp"
+                }
+            ],
+            "environment": [
+                {
+                    "name": "XRAY_APP_NAME",
+                    "value": "mesh/${MESH_NAME}/virtualNode/${COLOR_VIRTUAL_NODE_NAME}"
+                },
+                {
+                    "name": "COLOR",
+                    "value": "${COLOR}"
+                },
+                {
+                    "name": "PORT",
+                    "value": "${CONTAINER_PORT}"
+                }
+            ],
+            "dependsOn": [
+                {
+                    "containerName": "envoy",
+                    "condition": "HEALTHY"
+                }
+            ]
+        }
+    ],
+    "requiresCompatibilities": [
+        "EC2",
+        "FARGATE"
+    ]
+}
