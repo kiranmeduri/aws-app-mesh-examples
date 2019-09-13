@@ -6,10 +6,15 @@ if [ ! -z "${AWS_PROFILE}" ]; then
     PROFILE_OPT="--profile ${AWS_PROFILE}"
 fi
 
+cli_svc="appmesh"
+if [ "$APPMESH_PREVIEW" = "1" ]; then
+    cli_svc="appmesh-preview"
+fi
+
 if [ "$APPMESH_ENDPOINT" = "" ]; then
-    appmesh_cmd="aws appmesh"
+    appmesh_cmd="aws ${cli_svc}"
 else
-    appmesh_cmd="aws --endpoint-url "${APPMESH_ENDPOINT}" appmesh"
+    appmesh_cmd="aws --endpoint-url "${APPMESH_ENDPOINT}" ${cli_svc}"
 fi
 
 virtual_services=($($appmesh_cmd list-virtual-services \
