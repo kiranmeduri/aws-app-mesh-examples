@@ -1,0 +1,264 @@
+{
+    "admin": {
+      "access_log_path": "/dev/null",
+      "address": {
+        "socket_address": {
+          "address": "0.0.0.0",
+          "port_value": 9901
+        }
+      }
+    },
+    "stats_sinks": [
+      {
+        "name": "envoy.dog_statsd",
+        "config": {
+          "address": {
+            "socket_address": {
+              "port_value": 8125,
+              "protocol": "udp",
+              "address": "127.0.0.1"
+            }
+          }
+        }
+      }
+    ],
+    "stats_config": {
+      "stats_tags": [
+        {
+          "tag_name": "appmesh.virtual_node",
+          "fixed_value": "colorgateway-vn"
+        },
+        {
+          "tag_name": "appmesh.mesh",
+          "fixed_value": "beta-mesh"
+        }
+      ]
+    },
+    "static_resources": {
+      "clusters": [
+        {
+          "name": "cds_egress_beta-mesh_amazonaws",
+          "type": "ORIGINAL_DST",
+          "connect_timeout": "1s",
+          "lb_policy": "ORIGINAL_DST_LB"
+        },
+        {
+          "name": "cds_egress_colorteller-vn-1",
+          "type": "LOGICAL_DNS",
+          "connect_timeout": "1s",
+          "http2_protocol_options": {},
+          "load_assignment": {
+            "cluster_name": "cds_egress_colorteller-vn-1",
+            "endpoints": [
+              {
+                "lb_endpoints": [
+                  {
+                    "endpoint": {
+                      "address": {
+                        "socket_address": {
+                          "address": "color.howto-ingress.pvt.local",
+                          "port_value": 9080
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "listeners": [
+        {
+          "name": "ingress",
+          "address": {
+            "socket_address": {
+              "address": "0.0.0.0",
+              "port_value": 15000
+            }
+          },
+          "filter_chains": [
+            {
+              "filter_chain_match": {
+                "destination_port": 9080
+              },
+              "filters": [
+                {
+                  "name": "envoy.http_connection_manager",
+                  "config": {
+                    "tracing": {"operation_name": "INGRESS"},
+                    "access_log": [{
+                      "name": "envoy.file_access_log",
+                      "config": {
+                        "path": "/dev/stdout"
+                      }
+                    }],
+                    "http_filters": [
+                      {
+                        "name": "envoy.router"
+                      }
+                    ],
+                    "route_config": {
+                      "name": "rds_ingress_http_9080",
+                      "virtual_hosts": [
+                        {
+                          "name": "local_service",
+                          "domains": [
+                            "*"
+                          ],
+                          "routes": [
+                            {
+                              "match": {
+                                "prefix": "/"
+                              },
+                              "route": {
+                                "cluster": ""
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "stat_prefix": "ingress"
+                  }
+                }
+              ]
+            }
+          ],
+          "listener_filters": [
+            {
+              "name": "envoy.listener.original_dst"
+            }
+          ]
+        },
+        {
+          "name": "lds_egress_0.0.0.0_15001",
+          "address": {
+            "socket_address": {
+              "address": "0.0.0.0",
+              "port_value": 15001
+            }
+          },
+          "filter_chains": [
+            {
+              "filter_chain_match": {
+                "destination_port": 9080
+              },
+              "filters": [
+                {
+                  "name": "envoy.http_connection_manager",
+                  "config": {
+                    "tracing": {
+                      "operation_name": "EGRESS"
+                    },
+                    "access_log": [{
+                      "name": "envoy.file_access_log",
+                      "config": {
+                        "path": "/dev/stdout"
+                      }
+                    }],
+                    "http_filters": [
+                      {
+                        "name": "envoy.router",
+                        "config": {
+                          "upstream_log": [{
+                            "name": "envoy.file_access_log",
+                            "config": {
+                              "path": "/dev/stdout"
+                            }
+                          }]
+                        }
+                      }
+                    ],
+                    "route_config": {
+                      "name": "rds_egress_http_9080",
+                      "virtual_hosts": [
+                        {
+                          "name": "colorteller.beta.svc.cluster.local",
+                          "domains": [
+                            "colorteller.beta.svc.cluster.local",
+                            "colorteller.beta.svc.cluster.local:9080"
+                          ],
+                          "routes": [
+                            {
+                              "match": {
+                                "prefix": "/"
+                              },
+                              "route": {
+                                "weighted_clusters": {
+                                  "clusters": [
+                                    {
+                                      "name": "cds_egress_colorteller-vn-1",
+                                      "weight": 1
+                                    }
+                                  ],
+                                  "total_weight": 1
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "stat_prefix": "egress"
+                  }
+                }
+              ]
+            },
+            {
+              "filter_chain_match": {
+                "destination_port": 2701
+              },
+              "filters": [
+                {
+                  "name": "envoy.tcp_proxy",
+                  "config": {
+                    "stat_prefix": "egress",
+                    "cluster": "cds_egress_tcpecho-vn_tcp_2701",
+                    "access_log": [{
+                      "name": "envoy.file_access_log",
+                      "config": {
+                        "path": "/dev/stdout"
+                      }
+                    }]
+                  }
+                }
+              ]
+            },
+            {
+              "filter_chain_match": {
+                "destination_port": 443,
+                "server_names": [
+                  "*.amazonaws.com"
+                ]
+              },
+              "filters": [
+                {
+                  "name": "envoy.tcp_proxy",
+                  "config": {
+                    "stat_prefix": "egress",
+                    "cluster": "cds_egress_beta-mesh_amazonaws",
+                    "access_log": [{
+                      "name": "envoy.file_access_log",
+                      "config": {
+                        "path": "/dev/stdout"
+                      }
+                    }]
+                  }
+                }
+              ]
+            }
+          ],
+          "listener_filters": [
+            {
+              "name": "envoy.listener.original_dst"
+            },
+            {
+              "name": "envoy.listener.tls_inspector"
+            }
+          ]
+        }
+      ]
+    }
+  }
+  
