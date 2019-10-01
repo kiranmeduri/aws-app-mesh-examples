@@ -1,0 +1,363 @@
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name to link stacks
+
+  AppMeshXdsEndpoint:
+    Type: String
+    Description: App Mesh XDS Endpoint Override
+    Default: ""
+
+  EnvoyImage:
+    Type: String
+    Description: Envoy container image
+
+  ColorAppImage:
+    Type: String
+    Description: Color app container image
+
+  ContainerPort:
+    Type: Number
+    Description: Port number to use for applications
+    Default: 8080
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ProjectName}-color-log-group'
+      RetentionInDays: 30
+
+  TaskIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/AWSAppMeshEnvoyAccess
+
+  TaskExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  ColorServiceRegistry:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'color'
+      DnsConfig:
+        NamespaceId:
+          Fn::ImportValue:
+            !Sub '${ProjectName}:VPC1-DnsNamespaceId'
+        DnsRecords:
+          - Type: A
+            TTL: 300
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  ColorTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - 'FARGATE'
+      Family: !Sub '${ProjectName}-color'
+      NetworkMode: 'awsvpc'
+      Cpu: 256
+      Memory: 512
+      TaskRoleArn: !Ref TaskIamRole
+      ExecutionRoleArn: !Ref TaskExecutionIamRole
+      ContainerDefinitions:
+        - Name: 'app'
+          Image: !Ref ColorAppImage
+          Essential: true
+          DependsOn:
+            - ContainerName: 'xray'
+              Condition: 'START'
+            - ContainerName: 'envoy'
+              Condition: 'HEALTHY'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !Ref ContainerPort
+              Protocol: 'tcp'
+          Environment:
+            - Name: COLOR
+              Value: 'green'
+            - Name: PORT
+              Value: !Sub '${ContainerPort}'
+            - Name: XRAY_APP_NAME
+              Value:
+                Fn::Join:
+                  - ''
+                  -
+                    - Fn::ImportValue:
+                        !Sub '${ProjectName}:Mesh'
+                    - '/'
+                    - !GetAtt 'ColorVirtualNode.VirtualNodeName'
+        - Name: 'xray'
+          Image: "amazon/aws-xray-daemon"
+          Essential: true
+          User: '1337'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          PortMappings:
+            - ContainerPort: 2000
+              Protocol: 'udp'
+        - Name: envoy
+          Image: !Ref EnvoyImage
+          Essential: true
+          User: '1337'
+          DependsOn:
+            - ContainerName: 'xray'
+              Condition: 'START'
+          Ulimits:
+            - Name: "nofile"
+              HardLimit: 15000
+              SoftLimit: 15000
+          PortMappings:
+            - ContainerPort: 9901
+              Protocol: 'tcp'
+            - ContainerPort: 15000
+              Protocol: 'tcp'
+            - ContainerPort: 15001
+              Protocol: 'tcp'
+          HealthCheck:
+            Command:
+              - 'CMD-SHELL'
+              - 'curl -s http://localhost:9901/server_info | grep state | grep -q LIVE'
+            Interval: 5
+            Timeout: 10
+            Retries: 10
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          Environment:
+            - Name: 'ENVOY_LOG_LEVEL'
+              Value: 'debug'
+            - Name: 'ENABLE_ENVOY_XRAY_TRACING'
+              Value: '1'
+            - Name: 'ENABLE_ENVOY_STATS_TAGS'
+              Value: '1'
+            - Name: 'APPMESH_VIRTUAL_NODE_NAME'
+              Value:
+                Fn::Join:
+                  - ''
+                  -
+                    - 'mesh/'
+                    - Fn::ImportValue:
+                        !Sub '${ProjectName}:Mesh'
+                    - '/virtualNode/'
+                    - !GetAtt 'ColorVirtualNode.VirtualNodeName'
+
+  ColorECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ColorServiceRegistry
+    Properties:
+      Cluster:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:ECSCluster"
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 3
+      LaunchType: 'FARGATE'
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref ColorTargetGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt 'ColorServiceRegistry.Arn'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue:
+                !Sub '${ProjectName}:VPC1-AppSecurityGroup'
+          Subnets:
+            - Fn::ImportValue:
+               !Sub '${ProjectName}:VPC1-PrivateSubnet1'
+            - Fn::ImportValue:
+                !Sub '${ProjectName}:VPC1-PrivateSubnet2'
+      TaskDefinition: !Ref ColorTaskDef
+
+  ColorVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualNodeName: !Sub '${ProjectName}-color-node'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Ref ContainerPort
+              Protocol: http
+        ServiceDiscovery:
+          DNS:
+            Hostname:
+              # VPC dnsentries are of the form <hostedzone-id>:<dns-name>
+              # e.g. "Z1HUB23UULQXV:vpce-01abc23456de78f9g-12abccd3.ec2.us-east-1.vpce.amazonaws.com"
+              Fn::Select:
+                - 1
+                - Fn::Split:
+                    - ':'
+                    - Fn::Select:
+                        - 0
+                        - !GetAtt FrontVPCEndpoint.DnsEntries
+
+  ColorVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    DependsOn:
+      - ColorVirtualRouter
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualServiceName:
+        Fn::Join:
+          - '.'
+          - - !GetAtt 'ColorServiceRegistry.Name'
+            - !Sub '${ProjectName}.mesh.local'
+      Spec:
+        Provider:
+          VirtualRouter:
+            VirtualRouterName: !GetAtt ColorVirtualRouter.VirtualRouterName
+
+  ColorVirtualRouter:
+    Type: AWS::AppMesh::VirtualRouter
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualRouterName: !Sub '${ProjectName}-color-router'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Ref ContainerPort
+              Protocol: http
+
+  ColorRoute:
+    Type: AWS::AppMesh::Route
+    Properties:
+      MeshName:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:Mesh'
+      VirtualRouterName: !GetAtt ColorVirtualRouter.VirtualRouterName
+      RouteName: !Sub '${ProjectName}-color-route'
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: '/'
+          Action:
+            WeightedTargets:
+              - VirtualNode: !GetAtt ColorVirtualNode.VirtualNodeName
+                Weight: 50
+
+  ColorLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: network
+      Subnets:
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:VPC1-PrivateSubnet1'
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:VPC1-PrivateSubnet2'
+
+  ColorTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn:
+      - ColorLoadBalancer
+    Properties:
+      TargetType: ip
+      Name: !Sub '${ProjectName}-colortarget'
+      Port: !Ref ContainerPort
+      Protocol: TCP
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${ProjectName}:VPC1"
+
+  ColorLoadBalancerListener:
+    DependsOn:
+      - ColorLoadBalancer
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref ColorTargetGroup
+          Type: 'forward'
+      LoadBalancerArn: !Ref ColorLoadBalancer
+      Port: !Ref ContainerPort
+      Protocol: TCP
+
+  ColorVPCEndpointService:
+    Type: AWS::EC2::VPCEndpointService
+    Properties:
+      AcceptanceRequired: false
+      NetworkLoadBalancerArns:
+        - !Ref ColorLoadBalancer
+
+  FrontVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    DependsOn:
+      - ColorVPCEndpointService
+    Properties:
+      PrivateDnsEnabled: false
+      SecurityGroupIds:
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:VPC2-AppSecurityGroup'
+      ServiceName:
+        Fn::Join:
+          - '.'
+          - - 'com.amazonaws.vpce'
+            - !Ref AWS::Region
+            - !Ref ColorVPCEndpointService
+      SubnetIds:
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:VPC2-PrivateSubnet1'
+        - Fn::ImportValue:
+            !Sub '${ProjectName}:VPC2-PrivateSubnet2'
+      VpcEndpointType: Interface
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${ProjectName}:VPC2'
+
+Outputs:
+  ColorVirtualServiceName:
+    Description: 'Virtual Service name that will be resolved by callers'
+    Value: !GetAtt ColorVirtualService.VirtualServiceName
+    Export:
+      Name: !Sub "${ProjectName}:ColorVirtualServiceName"

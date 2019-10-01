@@ -1,0 +1,28 @@
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name to link stacks
+
+Resources:
+  Mesh:
+    Type: AWS::AppMesh::Mesh
+    Properties:
+      MeshName: !Ref ProjectName
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ProjectName
+
+Outputs:
+  Mesh:
+    Description: A reference to the App Mesh mesh
+    Value: !GetAtt Mesh.MeshName
+    Export:
+      Name: !Sub "${ProjectName}:Mesh"
+
+  Cluster:
+    Description: A reference to the ECS cluster
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${ProjectName}:ECSCluster"
