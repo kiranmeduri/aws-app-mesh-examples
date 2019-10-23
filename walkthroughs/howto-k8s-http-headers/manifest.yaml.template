@@ -252,6 +252,9 @@ spec:
       labels:
         app: front
     spec:
+      nodeSelector:
+        alpha.eksctl.io/nodegroup-name: app-mesh-nodes
+      serviceAccountName: app-mesh-pod
       containers:
         - name: app
           image: ${FRONT_APP_IMAGE}
@@ -299,6 +302,9 @@ spec:
         app: color
         version: green
     spec:
+      nodeSelector:
+        alpha.eksctl.io/nodegroup-name: app-mesh-nodes
+      serviceAccountName: app-mesh-pod
       containers:
         - name: app
           image: ${COLOR_APP_IMAGE}
@@ -346,6 +352,9 @@ spec:
         app: color
         version: blue
     spec:
+      nodeSelector:
+        alpha.eksctl.io/nodegroup-name: app-mesh-nodes
+      serviceAccountName: app-mesh-pod
       containers:
         - name: app
           image: ${COLOR_APP_IMAGE}
@@ -393,6 +402,9 @@ spec:
         app: color
         version: red
     spec:
+      nodeSelector:
+        alpha.eksctl.io/nodegroup-name: app-mesh-nodes
+      serviceAccountName: app-mesh-pod
       containers:
         - name: app
           image: ${COLOR_APP_IMAGE}
@@ -440,6 +452,9 @@ spec:
         app: color
         version: yellow
     spec:
+      nodeSelector:
+        alpha.eksctl.io/nodegroup-name: app-mesh-nodes
+      serviceAccountName: app-mesh-pod
       containers:
         - name: app
           image: ${COLOR_APP_IMAGE}
@@ -487,6 +502,9 @@ spec:
         app: color
         version: white
     spec:
+      nodeSelector:
+        alpha.eksctl.io/nodegroup-name: app-mesh-nodes
+      serviceAccountName: app-mesh-pod
       containers:
         - name: app
           image: ${COLOR_APP_IMAGE}
