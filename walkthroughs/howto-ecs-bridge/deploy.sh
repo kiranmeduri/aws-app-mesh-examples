@@ -18,59 +18,45 @@ if [ -z $ENVOY_IMAGE ]; then
 fi
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
-APP_DIR="${DIR}/../../examples/apps/colorapp"
-PROJECT_NAME="ecs-bridge"
+PROJECT_NAME="$(basename ${DIR})"
+STACK_NAME="appmesh-${PROJECT_NAME}"
 ECR_IMAGE_PREFIX=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${PROJECT_NAME}
+CW_AGENT_IMAGE="${ECR_IMAGE_PREFIX}/cwagent:$(git log -1 --format=%h src/cwagent)"
+COLOR_APP_IMAGE="${ECR_IMAGE_PREFIX}/colorapp:$(git log -1 --format=%h src/colorapp)"
+FRONT_APP_IMAGE="${ECR_IMAGE_PREFIX}/feapp:$(git log -1 --format=%h src/feapp)"
 
+# deploy_images builds and pushes docker images for colorapp and feapp to ECR
 deploy_images() {
-    for app in colorapp feapp; do
-        aws ecr describe-repositories --repository-name $PROJECT_NAME/$app >/dev/null 2>&1 || aws ecr create-repository --repository-name $PROJECT_NAME/$app
-        docker build -t ${ECR_IMAGE_PREFIX}/${app} ${DIR}/${app}
-        $(aws ecr get-login --no-include-email)
-        docker push ${ECR_IMAGE_PREFIX}/${app}
+    for f in cwagent colorapp feapp; do
+        aws ecr describe-repositories --repository-name ${PROJECT_NAME}/${f} >/dev/null 2>&1 || aws ecr create-repository --repository-name ${PROJECT_NAME}/${f}
     done
+
+    $(aws ecr get-login --no-include-email)
+    docker build -t ${CW_AGENT_IMAGE} ${DIR}/src/cwagent && docker push ${CW_AGENT_IMAGE}
+    docker build -t ${COLOR_APP_IMAGE} ${DIR}/src/colorapp && docker push ${COLOR_APP_IMAGE}
+    docker build -t ${FRONT_APP_IMAGE} ${DIR}/src/feapp && docker push ${FRONT_APP_IMAGE}
 }
 
-deploy_vpc() {
+# deploy deploys infra, colorapp and feapp.
+deploy() {
+    echo "Deploying stack ${STACK_NAME}, this may take a few minutes..."
     aws cloudformation deploy \
         --no-fail-on-empty-changeset \
-        --stack-name "${PROJECT_NAME}-vpc" \
-        --template-file "${DIR}/vpc.yaml" \
+        --stack-name ${STACK_NAME} \
+        --template-file "$DIR/app.yaml" \
         --capabilities CAPABILITY_IAM \
-        --parameter-overrides "ProjectName=${PROJECT_NAME}"
-}
-
-deploy_mesh() {
-    aws cloudformation deploy \
-        --no-fail-on-empty-changeset \
-        --stack-name "${PROJECT_NAME}-mesh" \
-        --template-file "${DIR}/mesh.yaml" \
-        --capabilities CAPABILITY_IAM \
-        --parameter-overrides "ProjectName=${PROJECT_NAME}"
-}
-
-deploy_ecs_cluster() {
-    aws cloudformation deploy \
-        --no-fail-on-empty-changeset \
-        --stack-name "${PROJECT_NAME}-ecs-cluster" \
-        --template-file "${DIR}/ecs-cluster.yaml" \
-        --capabilities CAPABILITY_IAM \
-        --parameter-overrides "ProjectName=${PROJECT_NAME}"
-}
-
-deploy_app() {
-    aws cloudformation deploy \
-        --no-fail-on-empty-changeset \
-        --stack-name "${PROJECT_NAME}-app" \
-        --template-file "${DIR}/app.yaml" \
-        --capabilities CAPABILITY_IAM \
-        --parameter-overrides "ProjectName=${PROJECT_NAME}" "EnvoyImage=${ENVOY_IMAGE}" "ColorAppImage=${ECR_IMAGE_PREFIX}/colorapp" "FrontAppImage=${ECR_IMAGE_PREFIX}/feapp"
+        --parameter-overrides \
+        "ProjectName=${PROJECT_NAME}" \
+        "EnvoyImage=${ENVOY_IMAGE}" \
+        "CloudWatchAgentImage=${CW_AGENT_IMAGE}" \
+        "ColorAppImage=${COLOR_APP_IMAGE}" \
+        "FrontAppImage=${FRONT_APP_IMAGE}"
 }
 
 delete_cfn_stack() {
     stack_name=$1
     aws cloudformation delete-stack --stack-name $stack_name
-    echo 'Waiting for the stack to be deleted, this may take a few minutes...'
+    echo "Waiting for the stack $stack_name to be deleted, this may take a few minutes..."
     aws cloudformation wait stack-delete-complete --stack-name $stack_name
     echo 'Done'
 }
@@ -84,47 +70,29 @@ confirm_service_linked_role() {
 print_endpoint() {
     echo "Public endpoint:"
     prefix=$(aws cloudformation describe-stacks \
-        --stack-name="${PROJECT_NAME}-app" \
+        --stack-name="${STACK_NAME}" \
         --query="Stacks[0].Outputs[?OutputKey=='FrontEndpoint'].OutputValue" \
         --output=text)
     echo "${prefix}/color"
 }
 
 deploy_stacks() {
+    confirm_service_linked_role
 
     if [ -z $SKIP_IMAGES ]; then
         echo "deploy images..."
         deploy_images
     fi
 
-    echo "deploy vpc..."
-    deploy_vpc
+    echo "deploy app"
+    deploy
 
-    echo "deploy ecs cluster..."
-    deploy_ecs_cluster
-
-    echo "deploy mesh..."
-    deploy_mesh
-
-    echo "deploy app..."
-    deploy_app
-
-    confirm_service_linked_role
     print_endpoint
 }
 
 delete_stacks() {
-    echo "delete app..."
-    delete_cfn_stack "${PROJECT_NAME}-app"
-
-    echo "delete mesh..."
-    delete_cfn_stack "${PROJECT_NAME}-mesh"
-
-    echo "delete cluster..."
-    delete_cfn_stack "${PROJECT_NAME}-ecs-cluster"
-
-    echo "delete vpc..."
-    delete_cfn_stack "${PROJECT_NAME}-vpc"
+    echo "delete stack ${STACK_NAME}..."
+    delete_cfn_stack ${STACK_NAME}
 }
 
 action=${1:-"deploy"}
