@@ -753,17 +753,9 @@ Resources:
   FrontTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      HealthCheckIntervalSeconds: 60
-      HealthCheckPath: '/ping'
-      HealthCheckPort: !Ref ContainerPort
-      HealthCheckProtocol: HTTP
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      TargetType: ip
       Name: !Sub '${ProjectName}-front'
       Port: !Ref ContainerPort
       Protocol: HTTP
-      UnhealthyThresholdCount: 2
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: 120
@@ -791,8 +783,6 @@ Resources:
     DependsOn:
       - FrontVirtualNode
     Properties:
-      RequiresCompatibilities:
-        - 'EC2'
       Family: !Sub '${ProjectName}-front'
       NetworkMode: 'bridge'
       Cpu: 256
@@ -811,12 +801,6 @@ Resources:
               awslogs-stream-prefix: 'front'
           PortMappings:
             - ContainerPort: !Ref ContainerPort
-              Protocol: 'tcp'
-          DependsOn:
-            - ContainerName: 'envoy'
-              Condition: 'HEALTHY'
-          PortMappings:
-            - ContainerPort: ${ContainerPort}
               Protocol: 'tcp'
           Links:
             - "envoy"
@@ -879,7 +863,6 @@ Resources:
         MaximumPercent: 200
         MinimumHealthyPercent: 100
       DesiredCount: 3
-      LaunchType: 'FARGATE'
       TaskDefinition: !Ref FrontTaskDef
       LoadBalancers:
         - ContainerName: app

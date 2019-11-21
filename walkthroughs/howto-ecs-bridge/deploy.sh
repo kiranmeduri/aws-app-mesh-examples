@@ -17,6 +17,11 @@ if [ -z $ENVOY_IMAGE ]; then
     exit 1
 fi
 
+if [ -z $KEY_PAIR ]; then
+    echo "KEY_PAIR environment variable is not set."
+    exit 1
+fi
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 PROJECT_NAME="$(basename ${DIR})"
 STACK_NAME="appmesh-${PROJECT_NAME}"
@@ -50,7 +55,8 @@ deploy() {
         "EnvoyImage=${ENVOY_IMAGE}" \
         "CloudWatchAgentImage=${CW_AGENT_IMAGE}" \
         "ColorAppImage=${COLOR_APP_IMAGE}" \
-        "FrontAppImage=${FRONT_APP_IMAGE}"
+        "FrontAppImage=${FRONT_APP_IMAGE}" \
+        "KeyName=${KEY_PAIR}"
 }
 
 delete_cfn_stack() {
