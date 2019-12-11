@@ -1,5 +1,5 @@
 FROM golang:1-stretch as builder
-ARG GO_PROXY=https://proxy.golang.org
+ARG GOPROXY=https://proxy.golang.org
 WORKDIR /go/src/github.com/aws/aws-app-mesh-examples/feapp
 
 # Force the go compiler to use modules.
@@ -10,7 +10,7 @@ COPY go.mod .
 COPY go.sum .
 
 # Set the proxies for the go compiler
-RUN go env -w GOPROXY=${GO_PROXY}
+RUN go env -w GOPROXY=${GOPROXY}
 # This ensures `go mod download` happens only when go.mod and go.sum change.
 RUN go mod download
 

@@ -6,6 +6,12 @@ metadata:
     appmesh.k8s.aws/sidecarInjectorWebhook: enabled
   name: ${APP_NAMESPACE}
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: ${APP_NAMESPACE}
+  name: appmesh-pod
+---
 apiVersion: appmesh.k8s.aws/v1beta1
 kind: Mesh
 metadata:
@@ -84,11 +90,29 @@ spec:
         app: front
         version: v1
     spec:
+      serviceAccountName: appmesh-pod
+      securityContext:
+        fsGroup: 1337
       containers:
-        - name: front
+        - name: app
           image: ${FRONT_APP_IMAGE}
           ports:
-            - containerPort: 8080
+            - name: app-port
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: app-port
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: app-port
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 1
           env:
             - name: "PORT"
               value: "8080"

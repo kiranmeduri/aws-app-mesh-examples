@@ -1,23 +1,7 @@
 ## Overview
-This example shows how Kubernetes deployments can use AWS CloudMap for service-discovery when using App Mesh. AWS Cloud Map is a cloud resource discovery service. With Cloud Map, you can define custom names for your application resources, and it maintains the updated location of these dynamically changing resources. This increases your application availability because your web service always discovers the most up-to-date locations of its resources.
-
-In this example there are two CloudMap services and three K8s Deployments as described below.
-
-### Color
-There are two deployments of colorapp, _blue_ and _red_. Pods of both these deployments are registered behind service colorapp.howto-k8s-cloudmap.pvt.aws.local. Blue pods are registered with the mesh as colorapp-blue virtual-node and red pods as colorapp-red virtual-node. These virtual-nodes are configured to use AWS CloudMap as service-discovery, hence the IP addresses of these pods are registered with the CloudMap service with corresponding attributes.
-
-Additionally a colorapp virtual-service is defined that routes traffic to blue and red virtual-nodes.
-
-### Front
-Front app acts as a gateway that makes remote calls to colorapp. Front app has single deployment with pods registered with the mesh as _front_ virtual-node. This virtual-node uses colorapp virtual-service as backend. This configures Envoy injected into front pod to use App Mesh's EDS to discover colorapp endpoints.
 
 ## Prerequisites
 [Walkthrough: App Mesh with EKS](../eks/)
-
-Note: This feature requires [aws-app-mesh-controller-for-k8s](https://github.com/aws/aws-app-mesh-controller-for-k8s) version >=0.1.2. Run the following to check the version of controller you are running.
-```
-$ kubectl get deployment -n appmesh-system appmesh-controller -o json  | jq -r ".spec.template.spec.containers[].image" | cut -f2 -d ':'
-```
 
 ## Setup
 
@@ -34,14 +18,14 @@ $ kubectl get deployment -n appmesh-system appmesh-controller -o json  | jq -r "
     ```
     export ENVOY_IMAGE=...
     ```
-5. **VPC_ID** environment variable is set to the VPC where Kubernetes pods are launched. VPC will be used to setup private DNS namespace in AWS using create-private-dns-namespace API. To find out VPC of EKS cluster you can use `aws eks describe-cluster`. See [below](#1-how-can-i-use-cloud-map-namespaces-other-than-privatednsnamespace) for reason why Cloud Map PrivateDnsNamespace is required.
-    ```
-    export VPC_ID=...
-    ```
-6. Deploy
-    ```. 
-    ./deploy.sh
-    ```
+
+## Fargate Support
+To use Fargate provide `EKS_CLUSTER_NAME` environment variable to setup FargateProfile. Then run `./setup-fargate.sh`
+
+## Deploy
+```
+./deploy.sh
+```
 
 ## Verify
 
