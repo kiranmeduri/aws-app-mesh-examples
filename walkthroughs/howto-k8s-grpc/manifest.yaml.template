@@ -86,13 +86,13 @@ spec:
           port: 8180
           protocol: http
   routes:
-    - name: simple-route
+    - name: http-route
       http:
         match:
-          path: /
+          prefix: /
         action:
           weightedTargets:
-            - virtualNodeName: simple-${APP_NAMESPACE}
+            - virtualNodeName: simple
               weight: 1
 ---
 apiVersion: appmesh.k8s.aws/v1beta1

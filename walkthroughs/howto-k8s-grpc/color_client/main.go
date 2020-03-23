@@ -77,7 +77,7 @@ func main() {
 			http.Error(w, fmt.Sprintf("Error reading response from %s: %s", simpleHost, err), http.StatusInternalServerError)
 			return
 		}
-		fmt.Fprint(w, body)
+		fmt.Fprint(w, string(body))
 	})
 
 	http.HandleFunc("/getColor", func(w http.ResponseWriter, req *http.Request) {
