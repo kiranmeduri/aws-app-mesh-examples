@@ -39,6 +39,12 @@ func main() {
 	log.Printf("COLOR_HOST is: %v", colorHost)
 	log.Printf("PORT is: %v", port)
 
+	simpleHost := os.Getenv("SIMPLE_HOST")
+	if simpleHost == "" {
+		log.Fatalf("no SIMPLE_HOST defined")
+	}
+	log.Printf("SIMPLE_HOST is: %v", simpleHost)
+
 	// Connect to COLOR_HOST
 	conn, err := grpc.Dial(colorHost, grpc.WithInsecure())
 	if err != nil {
@@ -51,8 +57,31 @@ func main() {
 
 	http.HandleFunc("/ping", func(w http.ResponseWriter, req *http.Request) {})
 
+	http.HandleFunc("/simple", func(w http.ResponseWriter, req *http.Request) {
+		log.Printf("Received simple request: %v", req)
+		simpleReq, _ := http.NewRequest("GET", "http://"+simpleHost, nil)
+		simpleResp, err := http.DefaultClient.Do(simpleReq)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error calling %s: %s", simpleHost, err), http.StatusInternalServerError)
+			return
+		}
+
+		if simpleResp.StatusCode != http.StatusOK {
+			http.Error(w, fmt.Sprintf("Error received simpleResponse with %d(%s) status from %s", simpleResp.StatusCode, simpleResp.Status, simpleHost), http.StatusInternalServerError)
+			return
+		}
+
+		defer simpleResp.Body.Close()
+		body, err := ioutil.ReadAll(simpleResp.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error reading response from %s: %s", simpleHost, err), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, body)
+	})
+
 	http.HandleFunc("/getColor", func(w http.ResponseWriter, req *http.Request) {
-		log.Printf("Recived getColor request: %v", req)
+		log.Printf("Received getColor request: %v", req)
 		resp, err := c.GetColor(ctx, &pb.GetColorRequest{})
 		if err != nil {
 			handleRpcError("GetColor", err, w)
@@ -82,7 +111,7 @@ func main() {
 	})
 
 	http.HandleFunc("/getFlakiness", func(w http.ResponseWriter, req *http.Request) {
-		log.Printf("Recived getFlakiness request: %v", req)
+		log.Printf("Received getFlakiness request: %v", req)
 		resp, err := c.GetFlakiness(ctx, &pb.GetFlakinessRequest{})
 		if err != nil {
 			handleRpcError("GetFlakiness", err, w)

@@ -21,10 +21,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 PROJECT_NAME="howto-k8s-grpc"
 APP_NAMESPACE=${PROJECT_NAME}
 MESH_NAME=${PROJECT_NAME}
-CLOUDMAP_NAMESPACE="${APP_NAMESPACE}.svc.cluster.local"
+CLOUDMAP_NAMESPACE="${APP_NAMESPACE}.svc.appmesh.aws"
 ECR_IMAGE_PREFIX="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${PROJECT_NAME}"
 CLIENT_APP_IMAGE="${ECR_IMAGE_PREFIX}/color_client"
 COLOR_APP_IMAGE="${ECR_IMAGE_PREFIX}/color_server"
+SIMPLE_APP_IMAGE="${ECR_IMAGE_PREFIX}/simple"
 
 error() {
     echo $1
@@ -51,7 +52,7 @@ check_appmesh_k8s() {
 }
 
 deploy_images() {
-    for app in color_client color_server; do
+    for app in color_client color_server simple; do
         aws ecr describe-repositories --repository-name $PROJECT_NAME/$app >/dev/null 2>&1 || aws ecr create-repository --repository-name $PROJECT_NAME/$app
         docker build -t ${ECR_IMAGE_PREFIX}/${app} ${DIR}/${app} --build-arg GO_PROXY=${GO_PROXY:-"https://proxy.golang.org"}
         $(aws ecr get-login --no-include-email)
@@ -64,15 +65,9 @@ deploy_cloudmap_ns() {
         jq -r ".Namespaces[] | select(.Name | contains(\"${CLOUDMAP_NAMESPACE}\")) | .Id"))
 
     if [ -z "${nsId}" ]; then
-        if [ -z "${VPC_ID}" ]; then
-            echo "VPC_ID must be set. VPC_ID corresponds to vpc where applications are deployed."
-            exit 1
-        fi
-
-        aws servicediscovery create-private-dns-namespace \
-            --name "${CLOUDMAP_NAMESPACE}" \
-            --vpc "${VPC_ID}"
-        echo "Created private-dns-namespace ${CLOUDMAP_NAMESPACE}"
+        aws servicediscovery create-http-namespace \
+            --name "${CLOUDMAP_NAMESPACE}"
+        echo "Created http-namespace ${CLOUDMAP_NAMESPACE}"
         sleep 5
     fi
 }
