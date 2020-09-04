@@ -1,0 +1,980 @@
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name to link stacks
+
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.0.0.0/19
+
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.0.32.0/19
+
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.0.64.0/19
+
+  PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.0.96.0/19
+
+  ColorAppImage:
+    Type: String
+    Description: Color app container image
+
+  CatAppImage:
+    Type: String
+    Description: Cat app container image
+
+  EnvoyImage:
+    Type: String
+    Description: Envoy container image
+
+  CloudWatchAgentImage:
+    Type: String
+    Description: CWAgent container image
+    Default: public.ecr.aws/cloudwatch-agent/cloudwatch-agent:latest
+
+  XRayDaemonImage:
+    Type: String
+    Description: XRay Daemon container image
+    Default: public.ecr.aws/xray/aws-xray-daemon:latest
+
+  ContainerPort:
+    Type: Number
+    Description: Port number to use for applications
+    Default: 8080
+
+Resources:
+
+  # START infra
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ProjectName
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref ProjectName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref ProjectName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Public Subnet (AZ1)'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Public Subnet (AZ2)'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Private Subnet (AZ1)'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Private Subnet (AZ2)'
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Public Routes'
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Private Routes (AZ1)'
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName} Private Routes (AZ2)'
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for the apps"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: !Ref VpcCIDR
+          IpProtocol: -1
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ProjectName}-log-group'
+      RetentionInDays: 30
+
+  TaskIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/AWSAppMeshEnvoyAccess
+
+  TaskExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  ServiceRegistryNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Sub '${ProjectName}.svc.local'
+      Vpc: !Ref VPC
+
+  Mesh:
+    Type: AWS::AppMesh::Mesh
+    Properties:
+      MeshName: !Ref ProjectName
+
+  VirtualServiceHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Sub '${ProjectName}.mesh.local'
+      HostedZoneConfig:
+        Comment: Private hosted zone for resolving virtual-services
+      VPCs:
+        - VPCId: !Ref VPC
+          VPCRegion: !Ref 'AWS::Region'
+
+  VirtualServiceWildcardRecord:
+    Type: AWS::Route53::RecordSet
+    DependsOn:
+      - VirtualServiceHostedZone
+    Properties:
+      HostedZoneId: !Ref VirtualServiceHostedZone
+      ResourceRecords:
+        - '1.2.3.4'
+      TTL: '900'
+      Name:
+        Fn::Join:
+          - '.'
+          -
+            - '*'
+            - !Sub '${ProjectName}.mesh.local'
+      Type: A 
+
+  # END infra
+
+  # START colorapp
+
+  ColorServiceRegistry:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'color'
+      DnsConfig:
+        NamespaceId: !GetAtt ServiceRegistryNamespace.Id
+        DnsRecords:
+          - Type: SRV
+            TTL: 300
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  ColorTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - 'FARGATE'
+      Family: !Sub '${ProjectName}-color'
+      NetworkMode: 'awsvpc'
+      Cpu: 256
+      Memory: 512
+      TaskRoleArn: !Ref TaskIamRole
+      ExecutionRoleArn: !Ref TaskExecutionIamRole
+      ProxyConfiguration:
+        Type: 'APPMESH'
+        ContainerName: 'envoy'
+        ProxyConfigurationProperties:
+          - Name: 'IgnoredUID'
+            Value: '1337'
+          - Name: 'ProxyIngressPort'
+            Value: '15000'
+          - Name: 'ProxyEgressPort'
+            Value: '15001'
+          - Name: 'AppPorts'
+            Value: !Sub '${ContainerPort}'
+          - Name: 'EgressIgnoredIPs'
+            Value: '169.254.170.2,169.254.169.254'
+      ContainerDefinitions:
+        - Name: 'app'
+          Image: !Ref ColorAppImage
+          Essential: true
+          DependsOn:
+            - ContainerName: 'envoy'
+              Condition: 'HEALTHY'
+            - ContainerName: 'xray'
+              Condition: 'START'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !Ref ContainerPort
+              Protocol: 'tcp'
+          Environment:
+            - Name: COLOR
+              Value: 'green'
+            - Name: PORT
+              Value: !Sub '${ContainerPort}'
+            - Name: XRAY_APP_NAME
+              Value: 'color'
+        - Name: 'xray'
+          Image: !Ref XRayDaemonImage
+          Essential: true
+          User: '1337'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          PortMappings:
+            - ContainerPort: 2000
+              Protocol: 'udp'
+        - Name: 'cwagent'
+          Image: !Ref CloudWatchAgentImage
+          User: '1337'
+          Essential: true
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'cwagent'
+          PortMappings:
+            - ContainerPort: 8125
+              Protocol: 'udp'
+          Environment:
+            - Name: CW_CONFIG_CONTENT
+              Value:
+                Fn::Sub:
+                  - "{ \"metrics\": { \"namespace\":\"${MetricNamespace}\", \"metrics_collected\": { \"statsd\": { \"metrics_aggregation_interval\": 0}}}}"
+                  - MetricNamespace:
+                      Fn::Join:
+                        - '/'
+                        - - !Ref ProjectName
+                          - !GetAtt ColorVirtualNode.VirtualNodeName
+                          - StatsD
+        - Name: envoy
+          Image: !Ref EnvoyImage
+          Essential: true
+          User: '1337'
+          DependsOn:
+            - ContainerName: 'xray'
+              Condition: 'START'
+          Ulimits:
+            - Name: "nofile"
+              HardLimit: 15000
+              SoftLimit: 15000
+          PortMappings:
+            - ContainerPort: 9901
+              Protocol: 'tcp'
+            - ContainerPort: 15000
+              Protocol: 'tcp'
+            - ContainerPort: 15001
+              Protocol: 'tcp'
+          HealthCheck:
+            Command:
+              - 'CMD-SHELL'
+              - 'curl -s http://localhost:9901/server_info | grep state | grep -q LIVE'
+            Interval: 5
+            Timeout: 10
+            Retries: 10
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'color'
+          Environment:
+            - Name: 'ENVOY_LOG_LEVEL'
+              Value: 'debug'
+            - Name: 'ENABLE_ENVOY_XRAY_TRACING'
+              Value: '1'
+            - Name: 'ENABLE_ENVOY_STATS_TAGS'
+              Value: '1'
+            - Name: 'ENABLE_ENVOY_DOG_STATSD'
+              Value: '1'
+            - Name: 'APPMESH_VIRTUAL_NODE_NAME'
+              Value:
+                Fn::Join:
+                  - ''
+                  -
+                    - 'mesh/'
+                    - !GetAtt Mesh.MeshName
+                    - '/virtualNode/'
+                    - !GetAtt ColorVirtualNode.VirtualNodeName
+
+  ColorECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ColorServiceRegistry
+    Properties:
+      Cluster: !Ref ECSCluster
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 3
+      LaunchType: 'FARGATE'
+      ServiceRegistries:
+        - RegistryArn: !GetAtt 'ColorServiceRegistry.Arn'
+          ContainerName: app
+          ContainerPort: !Ref ContainerPort
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref AppSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+      TaskDefinition: !Ref ColorTaskDef
+
+  ColorVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !GetAtt Mesh.MeshName
+      VirtualNodeName: !Sub '${ProjectName}-color-node'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Ref ContainerPort
+              Protocol: http
+        ServiceDiscovery:
+          AWSCloudMap:
+            NamespaceName: !Sub '${ProjectName}.svc.local'
+            ServiceName: !GetAtt ColorServiceRegistry.Name
+            Attributes:
+              - Key: 'ECS_TASK_DEFINITION_FAMILY'
+                Value: !Sub '${ProjectName}-color'
+
+  ColorVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !GetAtt Mesh.MeshName
+      VirtualServiceName:
+        Fn::Join:
+          - '.'
+          - - !GetAtt ColorServiceRegistry.Name
+            - !Sub '${ProjectName}.mesh.local'
+      Spec:
+        Provider:
+          VirtualNode:
+            VirtualNodeName: !GetAtt ColorVirtualNode.VirtualNodeName
+
+  # END colorapp
+
+  # START catapp
+
+  CatServiceRegistry:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'cat'
+      DnsConfig:
+        NamespaceId: !GetAtt ServiceRegistryNamespace.Id
+        DnsRecords:
+          - Type: SRV
+            TTL: 300
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  CatTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - 'FARGATE'
+      Family: !Sub '${ProjectName}-cat'
+      NetworkMode: 'awsvpc'
+      Cpu: 256
+      Memory: 512
+      TaskRoleArn: !Ref TaskIamRole
+      ExecutionRoleArn: !Ref TaskExecutionIamRole
+      ProxyConfiguration:
+        Type: 'APPMESH'
+        ContainerName: 'envoy'
+        ProxyConfigurationProperties:
+          - Name: 'IgnoredUID'
+            Value: '1337'
+          - Name: 'ProxyIngressPort'
+            Value: '15000'
+          - Name: 'ProxyEgressPort'
+            Value: '15001'
+          - Name: 'AppPorts'
+            Value: !Sub '${ContainerPort}'
+          - Name: 'EgressIgnoredIPs'
+            Value: '169.254.170.2,169.254.169.254'
+      ContainerDefinitions:
+        - Name: 'app'
+          Image: !Ref CatAppImage
+          Essential: true
+          DependsOn:
+            - ContainerName: 'envoy'
+              Condition: 'HEALTHY'
+            - ContainerName: 'xray'
+              Condition: 'START'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'cat'
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !Ref ContainerPort
+              Protocol: 'tcp'
+          Environment:
+            - Name: PORT
+              Value: !Sub '${ContainerPort}'
+            - Name: XRAY_APP_NAME
+              Value: 'cat'
+        - Name: 'xray'
+          Image: !Ref XRayDaemonImage
+          Essential: true
+          User: '1337'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'cat'
+          PortMappings:
+            - ContainerPort: 2000
+              Protocol: 'udp'
+        - Name: 'cwagent'
+          Image: !Ref CloudWatchAgentImage
+          User: '1337'
+          Essential: true
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'cwagent'
+          PortMappings:
+            - ContainerPort: 8125
+              Protocol: 'udp'
+          Environment:
+            - Name: CW_CONFIG_CONTENT
+              Value:
+                Fn::Sub:
+                  - "{ \"metrics\": { \"namespace\":\"${MetricNamespace}\", \"metrics_collected\": { \"statsd\": { \"metrics_aggregation_interval\": 0}}}}"
+                  - MetricNamespace:
+                      Fn::Join:
+                        - '/'
+                        - - !Ref ProjectName
+                          - !GetAtt CatVirtualNode.VirtualNodeName
+                          - StatsD
+        - Name: envoy
+          Image: !Ref EnvoyImage
+          Essential: true
+          User: '1337'
+          DependsOn:
+            - ContainerName: 'xray'
+              Condition: 'START'
+          Ulimits:
+            - Name: "nofile"
+              HardLimit: 15000
+              SoftLimit: 15000
+          PortMappings:
+            - ContainerPort: 9901
+              Protocol: 'tcp'
+            - ContainerPort: 15000
+              Protocol: 'tcp'
+            - ContainerPort: 15001
+              Protocol: 'tcp'
+          HealthCheck:
+            Command:
+              - 'CMD-SHELL'
+              - 'curl -s http://localhost:9901/server_info | grep state | grep -q LIVE'
+            Interval: 5
+            Timeout: 10
+            Retries: 10
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'cat'
+          Environment:
+            - Name: 'ENVOY_LOG_LEVEL'
+              Value: 'debug'
+            - Name: 'ENABLE_ENVOY_XRAY_TRACING'
+              Value: '1'
+            - Name: 'ENABLE_ENVOY_STATS_TAGS'
+              Value: '1'
+            - Name: 'ENABLE_ENVOY_DOG_STATSD'
+              Value: '1'
+            - Name: 'APPMESH_VIRTUAL_NODE_NAME'
+              Value:
+                Fn::Join:
+                  - ''
+                  -
+                    - 'mesh/'
+                    - !GetAtt Mesh.MeshName
+                    - '/virtualNode/'
+                    - !GetAtt CatVirtualNode.VirtualNodeName
+
+  CatECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - CatServiceRegistry
+    Properties:
+      Cluster: !Ref ECSCluster
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 3
+      LaunchType: 'FARGATE'
+      ServiceRegistries:
+        - RegistryArn: !GetAtt 'CatServiceRegistry.Arn'
+          ContainerName: app
+          ContainerPort: !Ref ContainerPort
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref AppSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+      TaskDefinition: !Ref CatTaskDef
+
+  CatVirtualNode:
+    Type: AWS::AppMesh::VirtualNode
+    Properties:
+      MeshName: !GetAtt Mesh.MeshName
+      VirtualNodeName: !Sub '${ProjectName}-cat-node'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: !Ref ContainerPort
+              Protocol: http
+        ServiceDiscovery:
+          AWSCloudMap:
+            NamespaceName: !Sub '${ProjectName}.svc.local'
+            ServiceName: !GetAtt CatServiceRegistry.Name
+            Attributes:
+              - Key: 'ECS_TASK_DEFINITION_FAMILY'
+                Value: !Sub '${ProjectName}-cat'
+
+  CatVirtualService:
+    Type: AWS::AppMesh::VirtualService
+    Properties:
+      MeshName: !GetAtt Mesh.MeshName
+      VirtualServiceName:
+        Fn::Join:
+          - '.'
+          - - !GetAtt CatServiceRegistry.Name
+            - !Sub '${ProjectName}.mesh.local'
+      Spec:
+        Provider:
+          VirtualNode:
+            VirtualNodeName: !GetAtt CatVirtualNode.VirtualNodeName
+
+  # END catapp
+
+  # START vgw
+
+  MeshVirtualGateway:
+    Type: AWS::AppMesh::VirtualGateway
+    Properties:
+      MeshName: !GetAtt Mesh.MeshName
+      VirtualGatewayName: !Sub '${ProjectName}-vgw'
+      Spec:
+        Listeners:
+          - PortMapping:
+              Port: 9080
+              Protocol: http
+
+  DefaultGatewayRoute:
+    Type: AWS::AppMesh::GatewayRoute
+    Properties:
+      MeshName: !GetAtt Mesh.MeshName
+      VirtualGatewayName: !GetAtt MeshVirtualGateway.VirtualGatewayName
+      GatewayRouteName: !Sub '${ProjectName}-default-gwr'
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: '/'
+          Action:
+            Target:
+              VirtualService:
+                VirtualServiceName: !GetAtt ColorVirtualService.VirtualServiceName
+
+  ColorGatewayRoute:
+    Type: AWS::AppMesh::GatewayRoute
+    Properties:
+      MeshName: !GetAtt Mesh.MeshName
+      VirtualGatewayName: !GetAtt MeshVirtualGateway.VirtualGatewayName
+      GatewayRouteName: !Sub '${ProjectName}-color-gwr'
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: '/color'
+          Action:
+            Target:
+              VirtualService:
+                VirtualServiceName: !GetAtt ColorVirtualService.VirtualServiceName
+
+  CatGatewayRoute:
+    Type: AWS::AppMesh::GatewayRoute
+    Properties:
+      MeshName: !GetAtt Mesh.MeshName
+      VirtualGatewayName: !GetAtt MeshVirtualGateway.VirtualGatewayName
+      GatewayRouteName: !Sub '${ProjectName}-cat-gwr'
+      Spec:
+        HttpRoute:
+          Match:
+            Prefix: '/cat'
+          Action:
+            Target:
+              VirtualService:
+                VirtualServiceName: !GetAtt CatVirtualService.VirtualServiceName
+
+  MeshVirtualGatewayServiceRegistry:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: 'meshgateway'
+      DnsConfig:
+        NamespaceId: !GetAtt ServiceRegistryNamespace.Id
+        DnsRecords:
+          - Type: SRV
+            TTL: 300
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  MeshVirtualGatewayTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - 'FARGATE'
+      Family: !Sub '${ProjectName}-vgw'
+      NetworkMode: 'awsvpc'
+      Cpu: 256
+      Memory: 512
+      TaskRoleArn: !Ref TaskIamRole
+      ExecutionRoleArn: !Ref TaskExecutionIamRole
+      ContainerDefinitions:
+        - Name: 'xray'
+          Image: !Ref XRayDaemonImage
+          Essential: true
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'vgw'
+          PortMappings:
+            - ContainerPort: 2000
+              Protocol: 'udp'
+        - Name: 'cwagent'
+          Image: !Ref CloudWatchAgentImage
+          Essential: true
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'cwagent'
+          PortMappings:
+            - ContainerPort: 8125
+              Protocol: 'udp'
+          Environment:
+            - Name: CW_CONFIG_CONTENT
+              Value:
+                Fn::Sub:
+                  - "{ \"metrics\": { \"namespace\":\"${MetricNamespace}\", \"metrics_collected\": { \"statsd\": { \"metrics_aggregation_interval\": 0}}}}"
+                  - MetricNamespace:
+                      Fn::Join:
+                        - '/'
+                        - - !Ref ProjectName
+                          - !GetAtt MeshVirtualGateway.VirtualGatewayName
+                          - StatsD
+        - Name: envoy
+          Image: !Ref EnvoyImage
+          Essential: true
+          DependsOn:
+            - ContainerName: 'xray'
+              Condition: 'START'
+          Ulimits:
+            - Name: "nofile"
+              HardLimit: 15000
+              SoftLimit: 15000
+          PortMappings:
+            - ContainerPort: 9901
+              Protocol: 'tcp'
+            - ContainerPort: 9080
+              Protocol: 'tcp'
+          HealthCheck:
+            Command:
+              - 'CMD-SHELL'
+              - 'curl -s http://localhost:9901/server_info | grep state | grep -q LIVE'
+            Interval: 5
+            Timeout: 2
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'vgw'
+          Environment:
+            - Name: 'ENVOY_LOG_LEVEL'
+              Value: 'debug'
+            - Name: 'ENABLE_ENVOY_XRAY_TRACING'
+              Value: '1'
+            - Name: 'ENABLE_ENVOY_STATS_TAGS'
+              Value: '1'
+            - Name: 'ENABLE_ENVOY_DOG_STATSD'
+              Value: '1'
+            - Name: 'APPMESH_RESOURCE_ARN'
+              Value:
+                Fn::Join:
+                  - ''
+                  -
+                    - 'mesh/'
+                    - !GetAtt Mesh.MeshName
+                    - '/virtualGateway/'
+                    - !GetAtt MeshVirtualGateway.VirtualGatewayName
+
+  MeshVirtualGatewayECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - MeshVirtualGatewayServiceRegistry
+    Properties:
+      Cluster: !Ref ECSCluster
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 3
+      LaunchType: 'FARGATE'
+      ServiceRegistries:
+        - RegistryArn: !GetAtt MeshVirtualGatewayServiceRegistry.Arn
+          ContainerName: envoy
+          ContainerPort: 9080
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref AppSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+      TaskDefinition: !Ref MeshVirtualGatewayTaskDef
+
+  # END vgw
+
+  # START apigw
+
+  MeshApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ProjectName}-api'
+      ProtocolType: HTTP
+
+  ApiGatewayVpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: !Sub '${ProjectName}-vpclink'
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  MeshVirtualGatewayApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref MeshApi
+      ConnectionId: !Ref ApiGatewayVpcLink
+      ConnectionType: VPC_LINK
+      IntegrationMethod: ANY
+      IntegrationType: HTTP_PROXY
+      IntegrationUri: !GetAtt MeshVirtualGatewayServiceRegistry.Arn
+      PayloadFormatVersion: '1.0'
+
+  DefaultApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref MeshApi
+      RouteKey: '$default'
+      Target: !Sub 'integrations/${MeshVirtualGatewayApiIntegration}'
+
+  MeshApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref MeshApi
+      StageName: $default
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt LogGroup.Arn
+        Format: '{"requestTime":"$context.requestTime","requestId":"$context.requestId","httpMethod":"$context.httpMethod","path":"$context.path","routeKey":"$context.routeKey","status":$context.status,"responseLatency":$context.responseLatency}'
+
+  # END apigw
+
+Outputs:
+  FrontEndpoint:
+    Description: 'API Gateway Endpoint'
+    Value: !GetAtt MeshApi.ApiEndpoint
+    Export:
+      Name: !Sub '${ProjectName}:FrontendEndpoint'
