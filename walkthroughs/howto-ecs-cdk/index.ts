@@ -7,10 +7,12 @@ import cdk = require('@aws-cdk/core');
 import servicediscovery = require('@aws-cdk/aws-servicediscovery');
 import elbv2 = require('@aws-cdk/aws-elasticloadbalancingv2');
 import fargateappmeshservice = require('./FargateAppMeshService');
+import ecsec2appmeshservice = require('./EcsEc2AppMeshService');
 
 const projectName = "howto-ecs-cdk"
 const cloudmapNamespaceName = `${projectName}.local`
 const portNumber = 8080
+const launchType = "EC2"
 
 class HowToEcsCdkStack extends cdk.Stack {
     constructor(scope: cdk.App, id: string, props?: cdk.StackProps) {
@@ -40,6 +42,11 @@ class HowToEcsCdkStack extends cdk.Stack {
                 type: servicediscovery.NamespaceType.DNS_PRIVATE,
             }
         });
+        if launchType === "EC2" {
+            cluster.addCapacity('DefaultAutoScalingGroup', {
+                instanceType: ec2.InstanceType.of(ec2.InstanceClass.M5N, ec2.InstanceSize.LARGE)
+            });
+        }
 
         //INFRA: appmesh mesh 
         const mesh = new appmesh.Mesh(this, 'mesh', {
@@ -63,47 +70,50 @@ class HowToEcsCdkStack extends cdk.Stack {
         const logGroup = new logs.LogGroup(this, 'log-group')
 
         //APP: 
-        const colorService = new fargateappmeshservice.FargateAppMeshService(this, 'color', {
-            cluster: cluster,
-            mesh: mesh,
-            portNumber: portNumber,
-            taskRole: taskRole,
-            executionRole: executionRole,
-            cloudmapNamespaceName: cloudmapNamespaceName,
-            envoyImage: ecs.ContainerImage.fromRegistry(envoyImage.valueAsString),
-            logGroup: logGroup,
-            enableXRay: true,
-            applicationContainerOpts: {
-                image: ecs.ContainerImage.fromRegistry(colorAppImage.valueAsString),
-                memoryLimitMiB: 512,
-                cpu: 256,
-                environment: {
-                    PORT: `${portNumber}`,
-                    COLOR: 'green',
+        var colorService, frontService;
+        if launchType === "FARGATE" {
+            colorService = new fargateappmeshservice.FargateAppMeshService(this, 'color', {
+                cluster: cluster,
+                mesh: mesh,
+                portNumber: portNumber,
+                taskRole: taskRole,
+                executionRole: executionRole,
+                cloudmapNamespaceName: cloudmapNamespaceName,
+                envoyImage: ecs.ContainerImage.fromRegistry(envoyImage.valueAsString),
+                logGroup: logGroup,
+                enableXRay: true,
+                applicationContainerOpts: {
+                    image: ecs.ContainerImage.fromRegistry(colorAppImage.valueAsString),
+                    memoryLimitMiB: 512,
+                    cpu: 256,
+                    environment: {
+                        PORT: `${portNumber}`,
+                        COLOR: 'green',
+                    }
                 }
-            }
-        });
+            });
 
-        const frontService = new fargateappmeshservice.FargateAppMeshService(this, 'front', {
-            cluster: cluster,
-            mesh: mesh,
-            portNumber: portNumber,
-            taskRole: taskRole,
-            executionRole: executionRole,
-            cloudmapNamespaceName: cloudmapNamespaceName,
-            envoyImage: ecs.ContainerImage.fromRegistry(envoyImage.valueAsString),
-            logGroup: logGroup,
-            enableXRay: true,
-            applicationContainerOpts: {
-                image: ecs.ContainerImage.fromRegistry(frontAppImage.valueAsString),
-                memoryLimitMiB: 512,
-                cpu: 256,
-                environment: {
-                    COLOR_HOST: `color.${cloudmapNamespaceName}:${portNumber}`,
-                    PORT: `${portNumber}`
+            frontService = new fargateappmeshservice.FargateAppMeshService(this, 'front', {
+                cluster: cluster,
+                mesh: mesh,
+                portNumber: portNumber,
+                taskRole: taskRole,
+                executionRole: executionRole,
+                cloudmapNamespaceName: cloudmapNamespaceName,
+                envoyImage: ecs.ContainerImage.fromRegistry(envoyImage.valueAsString),
+                logGroup: logGroup,
+                enableXRay: true,
+                applicationContainerOpts: {
+                    image: ecs.ContainerImage.fromRegistry(frontAppImage.valueAsString),
+                    memoryLimitMiB: 512,
+                    cpu: 256,
+                    environment: {
+                        COLOR_HOST: `color.${cloudmapNamespaceName}:${portNumber}`,
+                        PORT: `${portNumber}`
+                    }
                 }
-            }
-        });
+            });
+        }
 
         frontService.connectToMeshService(colorService);
 
